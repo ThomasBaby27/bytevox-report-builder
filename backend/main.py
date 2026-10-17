@@ -8,6 +8,7 @@ import auth
 from fastapi import UploadFile, File
 import json
 from engine import parse_and_profile_csv, MAX_FILE_SIZE_BYTES
+from engine import parse_and_profile_csv, compute_block_calculation, MAX_FILE_SIZE_BYTES
 
 Base.metadata.create_all(bind=engine)
 
@@ -125,4 +126,89 @@ def get_dataset(
         "columns": json.loads(dataset.columns_metadata),
         "unparsed_rows": json.loads(dataset.error_summary) if dataset.error_summary else [],
         "preview": json.loads(dataset.raw_data)[:10]
+    }
+    
+class BlockSchema(BaseModel):
+    id: Optional[str] = None
+    type: str
+    order: int
+    config: Dict[str, Any]
+
+class ReportCreateSchema(BaseModel):
+    dataset_id: str
+    title: str
+    global_filter: Optional[Dict[str, Any]] = {}
+    blocks: List[BlockSchema] = []
+
+@app.post("/api/reports")
+def create_or_update_report(
+    payload: ReportCreateSchema,
+    current_user: models.User = Depends(auth.get_current_user),
+    db: Session = Depends(get_db)
+):
+    # Verify dataset belongs to current user
+    dataset = db.query(models.Dataset).filter(
+        models.Dataset.id == payload.dataset_id,
+        models.Dataset.user_id == current_user.id
+    ).first()
+    if not dataset:
+        raise HTTPException(status_code=404, detail="Dataset not found or access denied")
+
+    report = models.Report(
+        user_id=current_user.id,
+        dataset_id=dataset.id,
+        title=payload.title,
+        global_filter=json.dumps(payload.global_filter)
+    )
+    db.add(report)
+    db.flush()
+
+    for b in payload.blocks:
+        block = models.ReportBlock(
+            report_id=report.id,
+            order=b.order,
+            type=b.type,
+            config=json.dumps(b.config)
+        )
+        db.add(block)
+
+    db.commit()
+    db.refresh(report)
+    return {"report_id": report.id, "message": "Report created successfully"}
+
+@app.get("/api/reports/{report_id}")
+def get_report(
+    report_id: str,
+    current_user: models.User = Depends(auth.get_current_user),
+    db: Session = Depends(get_db)
+):
+    report = db.query(models.Report).filter(
+        models.Report.id == report_id,
+        models.Report.user_id == current_user.id
+    ).first()
+    if not report:
+        raise HTTPException(status_code=404, detail="Report not found")
+
+    raw_data = json.loads(report.dataset.raw_data)
+    global_filter = json.loads(report.global_filter) if report.global_filter else {}
+
+    computed_blocks = []
+    for b in sorted(report.blocks, key=lambda x: x.order):
+        config = json.loads(b.config)
+        calc_result = compute_block_calculation(raw_data, b.type, config, global_filter)
+        computed_blocks.append({
+            "id": b.id,
+            "type": b.type,
+            "order": b.order,
+            "config": config,
+            "result": calc_result
+        })
+
+    return {
+        "id": report.id,
+        "title": report.title,
+        "dataset_id": report.dataset_id,
+        "dataset_name": report.dataset.filename,
+        "global_filter": global_filter,
+        "blocks": computed_blocks
     }

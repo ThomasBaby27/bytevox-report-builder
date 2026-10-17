@@ -115,3 +115,205 @@ def parse_and_profile_csv(file_bytes: bytes, filename: str) -> Tuple[Dict[str, A
     }
 
     return profile, valid_rows, unparsed_rows
+
+def compute_block_calculation(
+    rows: List[Dict[str, Any]],
+    block_type: str,
+    config: Dict[str, Any],
+    global_filter: Dict[str, Any] = None
+) -> Dict[str, Any]:
+    df = pd.DataFrame(rows)
+    total_raw_rows = len(df)
+
+    if total_raw_rows == 0:
+        return {
+            "value": None,
+            "work": {
+                "summary": "No data available in dataset",
+                "operation": "None",
+                "filter_applied": "None",
+                "total_rows": 0,
+                "rows_included": 0,
+                "rows_excluded": 0,
+                "reason_excluded": "Dataset is empty"
+            }
+        }
+
+    # 1. Apply Global Filters
+    filter_desc = []
+    filtered_df = df.copy()
+
+    if global_filter:
+        col = global_filter.get("column")
+        val = global_filter.get("value")
+        op = global_filter.get("operator", "equals")
+
+        if col and val is not None and col in filtered_df.columns:
+            initial_count = len(filtered_df)
+            if op == "equals":
+                filtered_df = filtered_df[filtered_df[col].astype(str) == str(val)]
+                filter_desc.append(f"{col} == '{val}'")
+            elif op == "date_from":
+                parsed_dates = pd.to_datetime(filtered_df[col], errors="coerce")
+                filtered_df = filtered_df[parsed_dates >= pd.to_datetime(val)]
+                filter_desc.append(f"{col} >= '{val}'")
+            elif op == "date_to":
+                parsed_dates = pd.to_datetime(filtered_df[col], errors="coerce")
+                filtered_df = filtered_df[parsed_dates <= pd.to_datetime(val)]
+                filter_desc.append(f"{col} <= '{val}'")
+
+    rows_after_filter = len(filtered_df)
+    filter_dropped = total_raw_rows - rows_after_filter
+    filter_applied_str = " AND ".join(filter_desc) if filter_desc else "None"
+
+    # 2. Text block handling
+    if block_type == "text":
+        return {
+            "content": config.get("content", ""),
+            "work": {
+                "summary": "Static text note",
+                "operation": "Text render",
+                "filter_applied": filter_applied_str,
+                "total_rows": total_raw_rows,
+                "rows_included": rows_after_filter,
+                "rows_excluded": filter_dropped,
+                "reason_excluded": f"{filter_dropped} rows filtered out by report filter" if filter_dropped else "None"
+            }
+        }
+
+    # 3. Metric block handling
+    if block_type == "metric":
+        target_col = config.get("column")
+        agg_func = config.get("aggregation", "sum").lower()
+        split_by = config.get("split_by")
+
+        if not target_col or target_col not in filtered_df.columns:
+            raise ValueError(f"Column '{target_col}' not found.")
+
+        if agg_func == "count":
+            valid_series = filtered_df[target_col].dropna().replace("", None).dropna()
+            numeric_dropped = rows_after_filter - len(valid_series)
+            val = len(valid_series)
+            op_label = f"COUNT({target_col})"
+        else:
+            numeric_series = pd.to_numeric(filtered_df[target_col], errors="coerce")
+            valid_df = filtered_df[numeric_series.notnull()].copy()
+            valid_df["_numeric"] = numeric_series[numeric_series.notnull()]
+            numeric_dropped = rows_after_filter - len(valid_df)
+
+            if agg_func == "sum":
+                val = round(float(valid_df["_numeric"].sum()), 2)
+                op_label = f"SUM({target_col})"
+            elif agg_func == "average":
+                val = round(float(valid_df["_numeric"].mean()), 2) if len(valid_df) > 0 else 0
+                op_label = f"AVG({target_col})"
+            elif agg_func == "min":
+                val = round(float(valid_df["_numeric"].min()), 2) if len(valid_df) > 0 else 0
+                op_label = f"MIN({target_col})"
+            elif agg_func == "max":
+                val = round(float(valid_df["_numeric"].max()), 2) if len(valid_df) > 0 else 0
+                op_label = f"MAX({target_col})"
+            else:
+                raise ValueError(f"Unsupported aggregation: {agg_func}")
+
+        # Optional split_by handling
+        breakdown = []
+        if split_by and split_by in filtered_df.columns:
+            if agg_func == "count":
+                grouped = filtered_df.groupby(split_by)[target_col].count()
+            else:
+                grouped = valid_df.groupby(split_by)["_numeric"].agg(agg_func)
+            breakdown = [{"category": str(k), "value": round(float(v), 2)} for k, v in grouped.items()]
+
+        total_excluded = filter_dropped + numeric_dropped
+        reason = []
+        if filter_dropped > 0:
+            reason.append(f"{filter_dropped} rows excluded by filter '{filter_applied_str}'")
+        if numeric_dropped > 0:
+            reason.append(f"{numeric_dropped} rows excluded due to null or non-numeric values in '{target_col}'")
+
+        return {
+            "value": val,
+            "breakdown": breakdown,
+            "work": {
+                "summary": f"{agg_func.capitalize()} of '{target_col}'" + (f" grouped by '{split_by}'" if split_by else ""),
+                "operation": op_label,
+                "filter_applied": filter_applied_str,
+                "total_rows": total_raw_rows,
+                "rows_included": total_raw_rows - total_excluded,
+                "rows_excluded": total_excluded,
+                "reason_excluded": "; ".join(reason) if reason else "None (all rows valid)"
+            }
+        }
+
+    # 4. Chart block handling (Bar / Line)
+    if block_type == "chart":
+        x_col = config.get("x_axis")
+        y_col = config.get("y_axis")
+        agg_func = config.get("aggregation", "sum").lower()
+
+        if not x_col or not y_col:
+            raise ValueError("Chart requires both x_axis and y_axis columns.")
+
+        numeric_y = pd.to_numeric(filtered_df[y_col], errors="coerce")
+        valid_df = filtered_df[numeric_y.notnull()].copy()
+        valid_df["_val"] = numeric_y[numeric_y.notnull()]
+        numeric_dropped = rows_after_filter - len(valid_df)
+
+        if agg_func == "sum":
+            grouped = valid_df.groupby(x_col)["_val"].sum()
+        elif agg_func == "average":
+            grouped = valid_df.groupby(x_col)["_val"].mean()
+        elif agg_func == "count":
+            grouped = valid_df.groupby(x_col)["_val"].count()
+        else:
+            grouped = valid_df.groupby(x_col)["_val"].sum()
+
+        data_points = [{"label": str(k), "value": round(float(v), 2)} for k, v in grouped.items()][:20]
+        total_excluded = filter_dropped + numeric_dropped
+
+        return {
+            "chart_type": config.get("chart_style", "bar"),
+            "data": data_points,
+            "work": {
+                "summary": f"{agg_func.capitalize()} of '{y_col}' by '{x_col}'",
+                "operation": f"GROUP_BY({x_col}) -> {agg_func.upper()}({y_col})",
+                "filter_applied": filter_applied_str,
+                "total_rows": total_raw_rows,
+                "rows_included": total_raw_rows - total_excluded,
+                "rows_excluded": total_excluded,
+                "reason_excluded": f"{filter_dropped} excluded by filter; {numeric_dropped} excluded due to non-numeric '{y_col}'"
+            }
+        }
+
+    # 5. Table block handling (Top N rows)
+    if block_type == "table":
+        sort_by = config.get("sort_by")
+        limit = int(config.get("limit", 5))
+
+        clean_table_df = filtered_df.copy()
+        if sort_by and sort_by in clean_table_df.columns:
+            # Try numeric sort first, fallback to string sort
+            numeric_sort = pd.to_numeric(clean_table_df[sort_by], errors="coerce")
+            if numeric_sort.notnull().sum() > 0:
+                clean_table_df["_sort"] = numeric_sort
+                clean_table_df = clean_table_df.sort_values(by="_sort", ascending=False).drop(columns=["_sort"])
+            else:
+                clean_table_df = clean_table_df.sort_values(by=sort_by, ascending=False)
+
+        top_rows = clean_table_df.head(limit).to_dict(orient="records")
+
+        return {
+            "rows": top_rows,
+            "work": {
+                "summary": f"Top {limit} rows sorted by '{sort_by}'",
+                "operation": f"SELECT * ORDER BY {sort_by} DESC LIMIT {limit}",
+                "filter_applied": filter_applied_str,
+                "total_rows": total_raw_rows,
+                "rows_included": rows_after_filter,
+                "rows_excluded": filter_dropped,
+                "reason_excluded": f"{filter_dropped} rows excluded by filter" if filter_dropped else "None"
+            }
+        }
+
+    raise ValueError(f"Unknown block type '{block_type}'")
