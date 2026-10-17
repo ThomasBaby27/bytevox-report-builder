@@ -1,0 +1,11 @@
+order_id,date,region,category,revenue,status
+1001,2026-01-05,North,Electronics,450.00,completed
+1002,2026-01-07,South,Clothing,,completed
+1003,invalid-date,West,Electronics,120.50,pending
+1004,2026-01-12,North,Home,89.00,completed
+1005,2026-01-15,East,Electronics,999.00,cancelled
+1006,2026-01-18,North,Clothing,45.00,completed
+1007,2026-01-20,,Home,15.00,pending
+1008,broken,line,with,too,many,columns,here
+1009,2026-01-24,South,Electronics,560.00,completed
+1010,2026-01-26,East,Clothing,,completed
