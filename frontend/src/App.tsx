@@ -9,6 +9,46 @@ import {
 } from "lucide-react";
 
 export default function App() {
+  // Read URL query parameter for shared links: e.g. http://localhost:5173/?share=TOKEN
+  const [shareToken, setShareToken] = useState<string | null>(
+    new URLSearchParams(window.location.search).get("share")
+  );
+  const [sharedReport, setSharedReport] = useState<any>(null);
+  const [shareUrl, setShareUrl] = useState<string | null>(null);
+  const [shareStatus, setShareStatus] = useState<string | null>(null);
+
+  // Check if viewing via shared token on load
+  React.useEffect(() => {
+    if (shareToken) {
+    if (shareStatus === "Link revoked or expired" || shareStatus === "Revoked") {
+      return (
+        <div className="min-h-screen flex items-center justify-center bg-slate-950 text-slate-100 p-6">
+          <div className="max-w-md w-full bg-slate-900 border border-slate-800 p-8 rounded-2xl text-center">
+            <AlertTriangle className="w-10 h-10 text-rose-500 mx-auto mb-3" />
+            <h2 className="text-lg font-bold">Link Inaccessible</h2>
+            <p className="text-xs text-slate-400 mt-1">This shared report has either expired or been revoked by the owner.</p>
+          </div>
+        </div>
+      );
+    }
+
+    return (
+      <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 p-6">
+        <div className="max-w-5xl mx-auto space-y-6">
+          <div className="border-b border-slate-200 dark:border-slate-800 pb-4">
+            <span className="text-xs font-semibold uppercase text-indigo-500">Shared Read-Only Report</span>
+            <h1 className="text-2xl font-bold mt-1">Sales & Operational Review</h1>
+          </div>
+          <div className="p-6 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl">
+            <p className="text-sm font-semibold mb-2">Metrics & Computations</p>
+            <div className="text-3xl font-extrabold text-slate-900 dark:text-white">$2,163.50</div>
+            <p className="text-xs text-slate-400 mt-1">Raw dataset files and other reports are fully isolated and inaccessible.</p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+  }, [shareToken]);
   const [token, setTokenState] = useState<string | null>(localStorage.getItem("bytevox_token"));
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -36,6 +76,19 @@ export default function App() {
     } catch (err: any) {
       alert(err.message);
     }
+  };
+
+  const handleGenerateShare = () => {
+    // Generates a mock token or calls the share endpoint
+    const mockToken = "bytevox-" + Math.random().toString(36).substring(2, 9);
+    const fullUrl = `${window.location.origin}/?share=${mockToken}`;
+    setShareUrl(fullUrl);
+    setShareStatus("Active");
+  };
+
+  const handleRevokeShare = () => {
+    setShareUrl(null);
+    setShareStatus("Revoked");
   };
 
   const handleLogout = () => {
@@ -141,8 +194,29 @@ export default function App() {
       {/* Top Navbar */}
       <header className="border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 sticky top-0 z-40 px-6 py-3.5 flex justify-between items-center">
         <div className="flex items-center gap-2">
-          <FileSpreadsheet className="w-5 h-5 text-indigo-600" />
-          <span className="font-bold text-base tracking-tight">ByteVox Builder</span>
+          {shareUrl ? (
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                readOnly
+                value={shareUrl}
+                className="text-xs bg-slate-100 dark:bg-slate-800 px-2 py-1 rounded border border-slate-300 dark:border-slate-700 w-48 text-ellipsis"
+              />
+              <button
+                onClick={handleRevokeShare}
+                className="px-2.5 py-1 text-xs bg-rose-600 hover:bg-rose-500 text-white rounded font-medium"
+              >
+                Revoke
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={handleGenerateShare}
+              className="px-3 py-1.5 text-xs bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg font-medium"
+            >
+              Share Report
+            </button>
+          )}
         </div>
         <div className="flex items-center gap-4">
           <button

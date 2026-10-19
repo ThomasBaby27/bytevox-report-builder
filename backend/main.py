@@ -9,7 +9,8 @@ from fastapi import UploadFile, File
 import json
 from engine import parse_and_profile_csv, MAX_FILE_SIZE_BYTES
 from engine import parse_and_profile_csv, compute_block_calculation, MAX_FILE_SIZE_BYTES
-
+from datetime import datetime, timedelta
+import uuid
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="ByteVox Report Builder API")
@@ -212,3 +213,103 @@ def get_report(
         "global_filter": global_filter,
         "blocks": computed_blocks
     }
+    
+class ShareCreateSchema(BaseModel):
+    expires_in_hours: Optional[int] = 24
+
+@app.post("/api/reports/{report_id}/share")
+def create_share_link(
+    report_id: str,
+    payload: ShareCreateSchema,
+    current_user: models.User = Depends(auth.get_current_user),
+    db: Session = Depends(get_db)
+):
+    # Verify the report belongs to the current user
+    report = db.query(models.Report).filter(
+        models.Report.id == report_id,
+        models.Report.user_id == current_user.id
+    ).first()
+    if not report:
+        raise HTTPException(status_code=404, detail="Report not found")
+
+    # If share link already exists, update or replace it
+    existing_link = db.query(models.ShareLink).filter(models.ShareLink.report_id == report.id).first()
+    expires_at = datetime.utcnow() + timedelta(hours=payload.expires_in_hours) if payload.expires_in_hours else None
+
+    if existing_link:
+        existing_link.token = str(uuid.uuid4())
+        existing_link.is_revoked = False
+        existing_link.expires_at = expires_at
+        db.commit()
+        db.refresh(existing_link)
+        return {"token": existing_link.token, "expires_at": existing_link.expires_at}
+
+    share = models.ShareLink(
+        report_id=report.id,
+        token=str(uuid.uuid4()),
+        is_revoked=False,
+        expires_at=expires_at
+    )
+    db.add(share)
+    db.commit()
+    db.refresh(share)
+    return {"token": share.token, "expires_at": share.expires_at}
+
+@app.delete("/api/reports/{report_id}/share")
+def revoke_share_link(
+    report_id: str,
+    current_user: models.User = Depends(auth.get_current_user),
+    db: Session = Depends(get_db)
+):
+    report = db.query(models.Report).filter(
+        models.Report.id == report_id,
+        models.Report.user_id == current_user.id
+    ).first()
+    if not report:
+        raise HTTPException(status_code=404, detail="Report not found")
+
+    share = db.query(models.ShareLink).filter(models.ShareLink.report_id == report.id).first()
+    if not share:
+        raise HTTPException(status_code=404, detail="No active share link found")
+
+    share.is_revoked = True
+    db.commit()
+    return {"message": "Share link revoked successfully"}
+
+@app.get("/api/shared/{token}")
+def get_shared_report(token: str, db: Session = Depends(get_db)):
+    share = db.query(models.ShareLink).filter(models.ShareLink.token == token).first()
+    
+    # Strictly reject revoked links
+    if not share or share.is_revoked:
+        raise HTTPException(status_code=404, detail="This shared report does not exist or has been revoked.")
+
+    # Strictly reject expired links
+    if share.expires_at and datetime.utcnow() > share.expires_at:
+        raise HTTPException(status_code=410, detail="This shared link has expired.")
+
+    report = share.report
+    raw_data = json.loads(report.dataset.raw_data)
+    global_filter = json.loads(report.global_filter) if report.global_filter else {}
+
+    # Deliver only computed results; never expose raw_data or raw CSV
+    computed_blocks = []
+    for b in sorted(report.blocks, key=lambda x: x.order):
+        config = json.loads(b.config)
+        calc_result = compute_block_calculation(raw_data, b.type, config, global_filter)
+        computed_blocks.append({
+            "id": b.id,
+            "type": b.type,
+            "order": b.order,
+            "config": config,
+            "result": calc_result
+        })
+
+    return {
+        "title": report.title,
+        "dataset_name": report.dataset.filename,
+        "global_filter": global_filter,
+        "blocks": computed_blocks,
+        "is_shared": True
+    }
+    
